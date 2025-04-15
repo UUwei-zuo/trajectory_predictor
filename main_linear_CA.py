@@ -1,7 +1,7 @@
 import torch
-from datetime import datetime
+import glob
 import os
-
+from datetime import datetime
 # Override torch.Tensor.__str__ to hide device info
 original_str = torch.Tensor.__str__
 def clean_str(self):
@@ -10,29 +10,19 @@ def clean_str(self):
     return original_str(self)
 torch.Tensor.__str__ = clean_str
 
-from Simulations.Linear_sysmdl import SystemModel  # Base class for linear system models
-import Simulations.config as config  # Configuration settings
-import Simulations.utils as utils  # Utility functions
-# Import model parameters for Constant Acceleration (CA) and Constant Velocity (CV) models
-from Simulations.Linear_CA.parameters import F_gen, F_CV, Q_gen, Q_CV, R_2, R_onlyPos, m, m_cv, get_observation_params, H_onlyPos_CV
-# F_gen, F_CV: State transition matrices for CA and CV models
-# Q_gen, Q_CV: Process noise covariance matrices for CA and CV models
+from Simulations.Linear_sysmdl import SystemModel
+import Simulations.config as config
+import Simulations.utils as utils
+from Simulations.Linear_CA.parameters import F_gen, Q_gen, R_2, R_onlyPos, m, get_observation_params
+# F_gen: State transition matrix for CA model
+# Q_gen: Process noise covariance matrix for CA model
 # R_2, R_onlyPos: Measurement noise covariance matrices
-# m, m_cv: State dimensions for CA and CV models
+# m: State dimension for CA model
 # get_observation_params: Function to get observation matrices and noise based on type
-# H_onlyPos_CV: Position-only observation matrix for CV model
-
-# Import Kalman Filter implementation for testing
 from Filters.KalmanFilter_test import KFTest
-
-# Import KalmanNet neural network model
 from KNet.KalmanNet_nn import KalmanNetNN
-
-# Import training and evaluation pipeline
 from Pipelines.Pipeline import Pipeline_KN as Pipeline
-
-# Import plotting utilities
-from Plot import Plot_extended as Plot
+from trajectory_plotter import TrajectoryPlotter
 
 ################
 ### Get Time ###
@@ -64,7 +54,7 @@ args.randomInit_cv = True   # Use random initial states for validation data
 args.randomInit_test = True  # Use random initial states for test data
 
 args.T = 100       # Length of each trajectory (time steps)
-args.T_test = 20  # Length of test trajectories
+args.T_test = 50  # Length of test trajectories
 
 ### Training parameters
 # If True: KalmanNet knows the random initial state during training
@@ -74,8 +64,8 @@ KnownRandInit_cv = True
 KnownRandInit_test = True
 args.use_cuda = True  # Use GPU acceleration if available
 args.n_steps = 1000   # Number of training steps/iterations default = 4000
-args.n_batch = 1024     # Batch size for training
-args.lr = 5e-4        # Learning rate
+args.n_batch = 2048     # Batch size for training
+args.lr = 6e-4        # Learning rate
 args.wd = 1e-3        # Weight decay (L2 regularization)
 
 # Add early stopping parameters
@@ -101,45 +91,45 @@ else:
     device = torch.device('cpu')
     print("Using CPU")
 
-# Set standard deviation for initial state generation based on randomInit settings
+# Replace the existing initial state configuration section with:
+
+####################################
+### Initial State Configuration ####
+####################################
+initial_state_config = {
+    # Mean values for initial state
+    'means': {
+        'position': {'x': 0.0, 'y': 0.0},        # Starting position (x,y)
+        'velocity': {'mag': 25.0},               # Initial velocity magnitude
+        'acceleration': {'mag': 2.0}             # Initial acceleration magnitude
+    },
+    # Standard deviations for initial state
+    'std_devs': {
+        'position': 1e-6,       # Very small position variance (start near origin)
+        'velocity': 10.0,       # Velocity component standard deviation
+        'acceleration': 2.0     # Acceleration component standard deviation
+    }
+}
+
+# Create initial state covariance matrix
 if (args.randomInit_train or args.randomInit_cv or args.randomInit_test):
-    position_std = 1e-6  # Standard deviation for initial position
-    velocity_std = 10.0  # Standard deviation for initial velocity
-    acceleration_std = 2.0  # Standard deviation for initial acceleration
-    # Create diagonal covariance matrix with individual variances
-    m2x_0_gen = torch.diag(torch.tensor([position_std, velocity_std, acceleration_std])**2)
-else:
-    # Zero standard deviation = deterministic initial state
     m2x_0_gen = torch.zeros(m, m)
+    # Position components
+    m2x_0_gen[0, 0] = initial_state_config['std_devs']['position'] ** 2  # x position
+    m2x_0_gen[3, 3] = initial_state_config['std_devs']['position'] ** 2  # y position
+    # Velocity components
+    m2x_0_gen[1, 1] = initial_state_config['std_devs']['velocity'] ** 2  # x velocity
+    m2x_0_gen[4, 4] = initial_state_config['std_devs']['velocity'] ** 2  # y velocity
+    # Acceleration components
+    m2x_0_gen[2, 2] = initial_state_config['std_devs']['acceleration'] ** 2  # x acceleration
+    m2x_0_gen[5, 5] = initial_state_config['std_devs']['acceleration'] ** 2  # y acceleration
+else:
+    m2x_0_gen = torch.zeros(m, m)
+
 # Set standard deviation for filter initialization based on KnownRandInit settings
 if (KnownRandInit_train or KnownRandInit_cv or KnownRandInit_test):
-    # If we know the initial state, no uncertainty in filter initialization
-    m2x_0 = torch.zeros(m, m)
-    m2x_0_cv = torch.zeros(m_cv, m_cv)
-else:
-    # If we don't know the initial state, add uncertainty in filter initialization
-    # You can also customize these if needed
-    filter_position_std = 1.0
-    filter_velocity_std = 0.5
-    filter_acceleration_std = 0.1
-    m2x_0 = torch.diag(torch.tensor([
-        filter_position_std ** 2,
-        filter_velocity_std ** 2,
-        filter_acceleration_std ** 2
-    ]))
-    # For CV model
-    m2x_0_cv = torch.diag(torch.tensor([
-        filter_position_std ** 2,
-        filter_velocity_std ** 2
-    ]))
-# Define custom mean values for initial states
-# These will be used as the mean for random initialization
-initial_position_mean = 0.0  # Mean initial position
-initial_velocity_mean = 25.0  # Mean initial velocity (e.g., 5 units/sec)
-initial_acceleration_mean = 0.0  # Mean initial acceleration (e.g., 0.0 units/sec²)
-# Initialize state vectors with custom means
-m1x_0 = torch.tensor([initial_position_mean, initial_velocity_mean, initial_acceleration_mean])
-m1x_0_cv = torch.tensor([initial_position_mean, initial_velocity_mean])  # For CV model
+    # Use zero uncertainty when we know the initial state exactly
+    m2x_0 = torch.zeros(m, m)  # Zero covariance matrix
 
 #############################
 ###  Dataset Generation   ###
@@ -147,12 +137,6 @@ m1x_0_cv = torch.tensor([initial_position_mean, initial_velocity_mean])  # For C
 ### Loss calculation settings
 Loss_On_AllState = False  # If False: only calculate test loss on position component
 Train_Loss_On_AllState = False  # If False: only calculate training loss on position component, default = True
-# Define state component weights for loss calculation (only used when Train_Loss_On_AllState=True)
-position_weight = 2.0    # Weight for position component in loss
-velocity_weight = 2.0    # Weight for velocity component in loss
-acceleration_weight = 1.0  # Weight for acceleration component in loss
-state_weights = torch.tensor([position_weight, velocity_weight, acceleration_weight])
-CV_model = False  # If True: use Constant Velocity model, else: use Constant Acceleration model
 observation_type = 'position_velocity'
 H_obs, R_obs = get_observation_params(observation_type)
 
@@ -160,35 +144,25 @@ H_obs, R_obs = get_observation_params(observation_type)
 DatafolderName = 'Simulations/Linear_CA/data/'
 DatafileName = 'decimated_dt1e-2_T100_r0_randnInit.pt'
 
+
+
 ####################
 ### System Model ###
 ####################
+# Initialize state vector with zeros
+m1x_0 = torch.zeros(m)
+
 # Generation model (CA - Constant Acceleration)
-# This model is used to generate the synthetic data with the selected observation matrix
 sys_model_gen = SystemModel(F_gen, Q_gen, H_obs, R_obs, args.T, args.T_test)
 sys_model_gen.InitSequence(m1x_0, m2x_0_gen)  # Initialize with x0 and P0
 
-if CV_model:
-    if observation_type == 'position_only':
-        H_obs_CV = H_onlyPos_CV  # Use the predefined matrix for position-only
-        R_obs_CV = R_onlyPos  # Single measurement noise
-    else:
-        H_obs_CV = torch.eye(2).float()  # Observe both position and velocity
-        R_obs_CV = R_2  # Use appropriate noise covariance for 2D measurements
-
-    # Initialize system models for CV model
-    sys_model_KF = SystemModel(F_CV, Q_CV, H_obs_CV, R_obs_CV, args.T, args.T_test)
-    sys_model_KF.InitSequence(m1x_0_cv, m2x_0_cv)
-    sys_model_KN = sys_model_KF  # Same model for KalmanNet in CV case
-else:
-    # Standard CA model for both KF and KalmanNet
-    sys_model_KF = SystemModel(F_gen, Q_gen, H_obs, R_obs, args.T, args.T_test)
-    sys_model_KF.InitSequence(m1x_0, m2x_0)
-    sys_model_KN = sys_model_KF  # Same model for both
+# Standard CA model for both KF and KalmanNet
+sys_model_KF = SystemModel(F_gen, Q_gen, H_obs, R_obs, args.T, args.T_test)
+sys_model_KN = SystemModel(F_gen, Q_gen, H_obs, R_obs, args.T, args.T_test)
 
 # Generate synthetic dataset
 print("Start Data Gen")
-utils.DataGen(args, sys_model_gen, DatafolderName+DatafileName)
+utils.DataGen(args, sys_model_gen, DatafolderName+DatafileName, initial_state_config)
 
 # Load the generated data
 print("Load Original Data")
@@ -196,22 +170,6 @@ print("Load Original Data")
  train_init, cv_init, test_init] = torch.load(DatafolderName+DatafileName,
                                              map_location=device,
                                              weights_only=False)
-# train_input: observations (y) for training
-# train_target: true states (x) for training
-# cv_input: observations (y) for cross-validation
-# cv_target: true states (x) for cross-validation
-# test_input: observations (y) for testing
-# test_target: true states (x) for testing
-# *_init: initial states for each dataset
-
-# If using CV model, truncate the state vectors to only include position and velocity
-if CV_model:  # Set state as (p,v) instead of (p,v,a)
-   train_target = train_target[:,0:m_cv,:]
-   train_init = train_init[:,0:m_cv]
-   cv_target = cv_target[:,0:m_cv,:]
-   cv_init = cv_init[:,0:m_cv]
-   test_target = test_target[:,0:m_cv,:]
-   test_init = test_init[:,0:m_cv]
 
 # Print data dimensions for verification
 print("Data Shape")
@@ -223,20 +181,33 @@ print("cvset state x size:", cv_target.size())
 print("cvset observation y size:", cv_input.size())
 
 print("Compute Loss on All States (if false, loss on position only):", Loss_On_AllState)
-
 ##############################
 ### Evaluate Kalman Filter ###
 ##############################
-# Run standard Kalman Filter as baseline
 print("Evaluate Kalman Filter")
 kf_args = {
     'allStates': Loss_On_AllState
 }
-if args.randomInit_test and KnownRandInit_test:
-    kf_args.update({'randomInit': True, 'test_init': test_init})
 
+# Get true initial states from test_target
+true_init_states = test_target[:, :, 0].unsqueeze(-1)  # Shape: [batch_size, state_dim, 1]
+
+# Create zero covariance for initialization
+zero_cov = torch.zeros(test_target.shape[0], sys_model_KF.m, sys_model_KF.m).to(test_target.device)
+
+# Print debug info
+print("Using true initial states for KF initialization")
+print("Initial state shape:", true_init_states.shape)
+print("First sample initial state:", true_init_states[0].squeeze())
+print("First ground truth state:", test_target[0, :, 0])
+
+# Run KF test with true initial states
 [MSE_KF_linear_arr, MSE_KF_linear_avg, MSE_KF_dB_avg, KF_out] = KFTest(
-    args, sys_model_KF, test_input, test_target, **kf_args)
+    args, sys_model_KF, test_input, test_target,
+    allStates=Loss_On_AllState,
+    randomInit=True,  # Enable custom initialization
+    test_init=true_init_states  # Pass true initial states
+)
 
 MSE_KF_dB_std = torch.std(10 * torch.log10(MSE_KF_linear_arr))
 print(f"KF-MSE Test: {MSE_KF_dB_avg:.4f} [dB]")
@@ -245,93 +216,50 @@ print(f"KF-STD Test: {MSE_KF_dB_std:.4f} [dB]")
 ##########################
 ### Evaluate KalmanNet ###
 ##########################
-# Build the KalmanNet neural network (with original model, it will learn to adapt)
+# Build the KalmanNet neural network
 KNet_model = KalmanNetNN()
-KNet_model.NNBuild(sys_model_KN, args)  # Use sys_model_KN instead of sys_model
+KNet_model.NNBuild(sys_model_KN, args)
 print("Number of trainable parameters for KNet pass 1:",
       sum(p.numel() for p in KNet_model.parameters() if p.requires_grad))
 
 # Set up the training and evaluation pipeline
 KNet_Pipeline = Pipeline(strTime, "KNet", "KNet")
-KNet_Pipeline.setssModel(sys_model_KN)  # Set system model - use sys_model_KN
-KNet_Pipeline.setModel(KNet_model)   # Set KalmanNet model
-KNet_Pipeline.setTrainingParams(args)  # Set training parameters
+KNet_Pipeline.setssModel(sys_model_KN)
+KNet_Pipeline.setModel(KNet_model)
+KNet_Pipeline.setTrainingParams(args)
 
-# Add this code to implement weighted loss for state components
-if Train_Loss_On_AllState:
-    # Move weights tensor to the correct device
-    state_weights = state_weights.to(device)
-    # Store the original loss function
-    original_loss_fn = KNet_Pipeline.loss_fn
-
-    # def weighted_loss_fn(output, target):
-    #     # If not using all states, fall back to original behavior
-    #     if not Train_Loss_On_AllState:
-    #         return original_loss_fn(output, target)
-    #     # Calculate MSE separately for each state component
-    #     # This approach ensures each component is weighted properly regardless of scale
-    #     position_mse = torch.mean((output[:, 0, :] - target[:, 0, :]) ** 2)
-    #     velocity_mse = torch.mean((output[:, 1, :] - target[:, 1, :]) ** 2)
-    #     # Handle acceleration if present (for CA model)
-    #     if output.shape[1] > 2:
-    #         accel_mse = torch.mean((output[:, 2, :] - target[:, 2, :]) ** 2)
-    #         # Apply weights to individual components
-    #         weighted_mse = (position_weight * position_mse +
-    #                         velocity_weight * velocity_mse +
-    #                         acceleration_weight * accel_mse)
-    #         # Normalize by sum of weights to keep loss scale consistent
-    #         return weighted_mse / (position_weight + velocity_weight + acceleration_weight)
-    #     else:
-    #         # For CV model with only position and velocity
-    #         weighted_mse = position_weight * position_mse + velocity_weight * velocity_mse
-    #         return weighted_mse / (position_weight + velocity_weight)
-
-    def weighted_loss_fn(output, target):
-        if not Train_Loss_On_AllState:
-            return original_loss_fn(output, target)
-
-        # Calculate component-wise MSE
-        component_mse = torch.stack([
-            torch.mean((output[:, i, :] - target[:, i, :]) ** 2)
-            for i in range(min(output.shape[1], len(state_weights)))
-        ])
-
-        # Apply weights (only for available components)
-        weights = state_weights[:component_mse.shape[0]].to(device)
-        return (weights * component_mse).sum() / weights.sum()
-
-    # Replace the loss function in the pipeline
-    KNet_Pipeline.loss_fn = weighted_loss_fn
-    print(f"Using weighted loss with weights: Position={position_weight}, "
-          f"Velocity={velocity_weight}, Acceleration={acceleration_weight}")
-
-# Train KalmanNet
-randomInit_train = args.randomInit_train and KnownRandInit_train
-print(f"Train KNet with {'Known' if randomInit_train else 'Unknown'} Random Initial State")
+# Train KalmanNet with true initial states
+randomInit_train = True  # Enable custom initialization
+print(f"Train KNet with True Initial States")
 print(f"Train Loss on All States (if false, loss on position only): {Train_Loss_On_AllState}")
 
+# Extract true initial states for training and cross-validation
+train_init_states = train_target[:, :, 0].unsqueeze(-1)  # Shape: [batch_size, state_dim, 1]
+cv_init_states = cv_target[:, :, 0].unsqueeze(-1)  # Shape: [batch_size, state_dim, 1]
+
+# Modify training arguments to use true initial states
 train_args = {
     'MaskOnState': not Train_Loss_On_AllState,
-    'randomInit': randomInit_train
+    'randomInit': randomInit_train,
+    'train_init': train_init_states,
+    'cv_init': cv_init_states
 }
-if randomInit_train:
-    train_args.update({'cv_init': cv_init, 'train_init': train_init})
 
 [MSE_cv_linear_epoch, MSE_cv_dB_epoch, MSE_train_linear_epoch, MSE_train_dB_epoch] = \
     KNet_Pipeline.NNTrain(sys_model_KN, cv_input, cv_target, train_input, train_target,
                           path_results, **train_args)
 
-# Test KalmanNet
-randomInit_test = args.randomInit_test and KnownRandInit_test
-print(f"Test KNet with {'Known' if randomInit_test else 'Unknown'} Random Initial State")
+# Test KalmanNet with true initial states
+randomInit_test = True  # Enable custom initialization
+print(f"Test KNet with True Initial States")
 print(f"Compute Loss on All States (if false, loss on position only): {Loss_On_AllState}")
 
+# Modify test arguments to use true initial states
 test_args = {
     'MaskOnState': not Loss_On_AllState,
-    'randomInit': randomInit_test
+    'randomInit': randomInit_test,
+    'test_init': true_init_states  # Use the same true init states as for KF
 }
-if randomInit_test:
-    test_args.update({'test_init': test_init})
 
 [MSE_test_linear_arr, MSE_test_linear_avg, MSE_test_dB_avg, KNet_out, RunTime] = \
     KNet_Pipeline.NNTest(sys_model_KN, test_input, test_target, path_results, **test_args)
@@ -339,43 +267,58 @@ if randomInit_test:
 ####################
 ### Plot results ###
 ####################
+
 # Set up file paths for saving plots
 PlotfolderName = "Figures/Linear_CA/"
-num_plots = 10  # Number of test trajectories to plot
 
 # Initialize plotting object
-Plot = Plot(PlotfolderName, "")
-print("Plot")
+Plot = TrajectoryPlotter(PlotfolderName, "KalmanNet CA Model")
+print("Plot initialized")
 
-# The plotting loop could be simplified with a list of dimensions and names:
-dimensions = [(0, "position"), (1, "velocity"), (2, "acceleration")]
+# Number of test samples to plot
+num_plots = 10  # Change this if you want fewer samples
+
+# Create the output directory if it doesn't exist
+os.makedirs(PlotfolderName, exist_ok=True)
+
+# Clear existing figures in the folder (optional)
+for file in glob.glob(f"{PlotfolderName}*.png"):
+    os.remove(file)
+print("Cleared existing figures")
 
 for i in range(num_plots):
     if i >= test_target.shape[0]:
         print(
             f"Warning: Not enough test trajectories. Requested trajectory {i + 1} but only have {test_target.shape[0]}")
         break
+    print(f"Generating plots for test sample {i + 1}")
 
-    prefix = f"{i + 1}_"
+    # Extract single test sample
     single_test_target = test_target[i:i + 1]
     single_KF_out = KF_out[i:i + 1]
     single_KNet_out = KNet_out[i:i + 1]
 
-    for dim, name in dimensions:
-        filename = f"{prefix}TrainPVA_{name}.png"
-        Plot.plotTraj_CA(single_test_target, single_KF_out, single_KNet_out,
-                         dim=dim, file_name=PlotfolderName + filename)
+    # File prefix for this sample
+    prefix = f"{i + 1}_"
 
-    # Also save the overall plots (all trajectories) with a special prefix
-overall_prefix = "all_"
-PlotfileName0 = f"{overall_prefix}TrainPVA_position.png"
-PlotfileName1 = f"{overall_prefix}TrainPVA_velocity.png"
-PlotfileName2 = f"{overall_prefix}TrainPVA_acceleration.png"
+    # 1. Position norm vs time plot
+    Plot.plot_component_norm_vs_time(
+        test_target=single_test_target,
+        knet_out=single_KNet_out,
+        kf_out=single_KF_out,
+        file_name_prefix=f"{PlotfolderName}{prefix}",
+        title_prefix=f"Test Sample {i + 1}"
+    )
 
-# Generate plots comparing ground truth, KF estimates, and KalmanNet estimates for all trajectories
-# dim=0: Position
-Plot.plotTraj_CA(test_target, KF_out, KNet_out, dim=0, file_name=PlotfolderName+PlotfileName0)
-# dim=1: Velocity
-Plot.plotTraj_CA(test_target, KF_out, KNet_out, dim=1, file_name=PlotfolderName+PlotfileName1)
-# dim=2: Acceleration
-Plot.plotTraj_CA(test_target, KF_out, KNet_out, dim=2, file_name=PlotfolderName+PlotfileName2)
+    # 2. XY plane trajectory
+    Plot.plot_2D_trajectory(
+        test_target=single_test_target,
+        kf_out=single_KF_out,
+        knet_out=single_KNet_out,
+        file_name=f"{PlotfolderName}{prefix}2D_trajectory.png",
+        title=f"Test Sample {i + 1}: 2D Trajectory",
+        show_ground_truth_points=True  # Add this parameter to show ground truth points
+    )
+
+print(f"Generated plots for {min(num_plots, test_target.shape[0])} test samples")
+print("Each sample has 2 plots: position norm and velocity norm, plus 2D trajectory")

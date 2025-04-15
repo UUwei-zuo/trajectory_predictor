@@ -80,26 +80,30 @@ class KalmanFilter:
         input y: batch of observations [batch_size, n, T]
         """
         y = y.to(self.device)
-        self.batch_size = y.shape[0] # batch size
-        T = y.shape[2] # sequence length (maximum length if randomLength=True)
+        self.batch_size = y.shape[0]  # batch size
+        T = y.shape[2]  # sequence length (maximum length if randomLength=True)
 
         # Batched F and H
-        self.batched_F = self.F.view(1,self.m,self.m).expand(self.batch_size,-1,-1).to(self.device)
+        self.batched_F = self.F.view(1, self.m, self.m).expand(self.batch_size, -1, -1).to(self.device)
         self.batched_F_T = torch.transpose(self.batched_F, 1, 2).to(self.device)
-        self.batched_H = self.H.view(1,self.n,self.m).expand(self.batch_size,-1,-1).to(self.device)
+        self.batched_H = self.H.view(1, self.n, self.m).expand(self.batch_size, -1, -1).to(self.device)
         self.batched_H_T = torch.transpose(self.batched_H, 1, 2).to(self.device)
 
         # Allocate Array for 1st and 2nd order moments (use zero padding)
         self.x = torch.zeros(self.batch_size, self.m, T).to(self.device)
         self.sigma = torch.zeros(self.batch_size, self.m, self.m, T).to(self.device)
-            
+
         # Set 1st and 2nd order moments for t=0
         self.m1x_posterior = self.m1x_0_batch.to(self.device)
         self.m2x_posterior = self.m2x_0_batch.to(self.device)
 
-        # Generate in a batched manner
-        for t in range(0, T):
-            yt = torch.unsqueeze(y[:, :, t],2)
-            xt,sigmat = self.Update(yt)
-            self.x[:, :, t] = torch.squeeze(xt,2)
+        # MODIFICATION: Directly use the initial state for t=0 without filtering
+        self.x[:, :, 0] = torch.squeeze(self.m1x_posterior, 2)
+        self.sigma[:, :, :, 0] = self.m2x_posterior
+
+        # Generate in a batched manner starting from t=1
+        for t in range(1, T):
+            yt = torch.unsqueeze(y[:, :, t], 2)
+            xt, sigmat = self.Update(yt)
+            self.x[:, :, t] = torch.squeeze(xt, 2)
             self.sigma[:, :, :, t] = sigmat

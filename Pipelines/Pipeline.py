@@ -7,8 +7,7 @@ import torch
 import torch.nn as nn
 import random
 import time
-from Plot import Plot_extended
-
+from trajectory_plotter import TrajectoryPlotter
 
 class Pipeline_KN:
 
@@ -75,14 +74,25 @@ class Pipeline_KN:
         self.MSE_train_dB_epoch = torch.zeros([self.N_steps], device=self.device)
 
         if MaskOnState:
-            # Mask for state variables
-            state_mask = torch.tensor([True, False, False], device=self.device)
-            if SysModel.m == 2:
-                state_mask = torch.tensor([True, False], device=self.device)
+            # Create appropriate mask based on state dimension
+            if SysModel.m == 6:  # 2D CA model
+                state_mask = torch.tensor([True, False, False, True, False, False],
+                                          device=self.device)  # x and y positions
+            elif SysModel.m == 4:  # 2D CV model
+                state_mask = torch.tensor([True, False, True, False], device=self.device)  # x and y positions
+            elif SysModel.m == 2:  # 1D model
+                state_mask = torch.tensor([True, False], device=self.device)  # position only
+            else:
+                # Default case
+                state_mask = torch.tensor([True] + [False] * (SysModel.m - 1), device=self.device)
 
-            # Mask for observation variables - only use first element (typically position)
+            # Also update the observation mask to handle 2D observations
             obs_mask = torch.zeros(SysModel.n, dtype=torch.bool, device=self.device)
-            obs_mask[0] = True  # Only keep first element (position)
+            if SysModel.n >= 2 and (SysModel.m == 6 or SysModel.m == 4):  # For 2D models
+                obs_mask[0] = True  # x position
+                obs_mask[1] = True  # y position (if available)
+            else:
+                obs_mask[0] = True  # Only first element for 1D models
 
         ##############
         ### Epochs ###
@@ -135,19 +145,19 @@ class Pipeline_KN:
                 ii += 1
 
             # Init Sequence
-            if (randomInit):
-                train_init_batch = torch.empty([self.N_B, SysModel.m, 1], device=self.device)
-                ii = 0
-                for index in n_e:
-                    train_init_batch[ii, :, 0] = torch.squeeze(train_init[index])
-                    ii += 1
-                self.model.InitSequence(train_init_batch, SysModel.T)
-            else:
-                self.model.InitSequence( \
-                    SysModel.m1x_0.reshape(1, SysModel.m, 1).repeat(self.N_B, 1, 1), SysModel.T)
+            train_init_batch = torch.zeros([self.N_B, SysModel.m, 1], device=self.device)
+            ii = 0
+            for index in n_e:
+                train_init_batch[ii, :, 0] = train_target[index, :, 0]
+                ii += 1
+            self.model.InitSequence(train_init_batch, SysModel.T)
 
             # Forward Computation
-            for t in range(0, SysModel.T):
+            # MODIFICATION: Directly assign initial state to output for t=0
+            x_out_training_batch[:, :, 0] = torch.squeeze(train_init_batch, 2)
+
+            # Start processing from t=1
+            for t in range(1, SysModel.T):
                 x_out_training_batch[:, :, t] = torch.squeeze(self.model(torch.unsqueeze(y_training_batch[:, :, t], 2)))
 
             # Compute Training Loss
@@ -253,18 +263,15 @@ class Pipeline_KN:
 
                 x_out_cv_batch = torch.empty([self.N_CV, SysModel.m, SysModel.T_test], device=self.device)
 
-                # Init Sequence
-                if (randomInit):
-                    if (cv_init == None):
-                        self.model.InitSequence( \
-                            SysModel.m1x_0.reshape(1, SysModel.m, 1).repeat(self.N_CV, 1, 1), SysModel.T_test)
-                    else:
-                        self.model.InitSequence(cv_init, SysModel.T_test)
-                else:
-                    self.model.InitSequence( \
-                        SysModel.m1x_0.reshape(1, SysModel.m, 1).repeat(self.N_CV, 1, 1), SysModel.T_test)
+                # Get true initial states from cv_target
+                cv_init_states = cv_target[:, :, 0].unsqueeze(-1)
+                self.model.InitSequence(cv_init_states, SysModel.T_test)
 
-                for t in range(0, SysModel.T_test):
+                # MODIFICATION: Directly assign initial state to output for t=0
+                x_out_cv_batch[:, :, 0] = torch.squeeze(cv_init_states, 2)
+
+                # Start processing from t=1
+                for t in range(1, SysModel.T_test):
                     x_out_cv_batch[:, :, t] = torch.squeeze(self.model(torch.unsqueeze(cv_input[:, :, t], 2)))
 
                 # Compute CV Loss
@@ -352,10 +359,26 @@ class Pipeline_KN:
         self.MSE_test_linear_arr = torch.zeros([self.N_T])
         x_out_test = torch.zeros([self.N_T, SysModel.m, SysModel.T_test]).to(self.device)
 
+        # Get true initial states from test_target
+        true_init_states = test_target[:, :, 0].unsqueeze(-1)  # Shape: [batch_size, state_dim, 1]
+
+        # Print debug info
+        print("KalmanNet using true initial states:")
+        print("First sample initial state:", true_init_states[0].squeeze())
+        print("First ground truth state:", test_target[0, :, 0])
+
         if MaskOnState:
-            state_mask = torch.tensor([True, False, False])
-            if SysModel.m == 2:
-                state_mask = torch.tensor([True, False])
+            # Create appropriate mask based on state dimension
+            if SysModel.m == 6:  # 2D CA model
+                state_mask = torch.tensor([True, False, False, True, False, False],
+                                          device=self.device)  # x and y positions
+            elif SysModel.m == 4:  # 2D CV model
+                state_mask = torch.tensor([True, False, True, False], device=self.device)  # x and y positions
+            elif SysModel.m == 2:  # 1D model
+                state_mask = torch.tensor([True, False], device=self.device)  # position only
+            else:
+                # Default case
+                state_mask = torch.tensor([True] + [False] * (SysModel.m - 1), device=self.device)
 
         # MSE LOSS Function
         loss_fn = nn.MSELoss(reduction='mean')
@@ -366,31 +389,33 @@ class Pipeline_KN:
         # Init Hidden State
         self.model.init_hidden_KNet()
 
-        with torch.no_grad():  # This is the correct way
-            # All the test code should be inside this context manager
-            if (randomInit):
-                self.model.InitSequence(test_init, SysModel.T_test)
-            else:
-                self.model.InitSequence(SysModel.m1x_0.reshape(1, SysModel.m, 1).repeat(self.N_T, 1, 1),
-                                        SysModel.T_test)
+        with torch.no_grad():
+            # Always use true initial states
+            self.model.InitSequence(true_init_states, SysModel.T_test)
 
-            for t in range(0, SysModel.T_test):
+            # MODIFICATION: Directly assign initial state to output for t=0
+            x_out_test[:, :, 0] = torch.squeeze(true_init_states, 2)
+
+            # Start processing from t=1
+            for t in range(1, SysModel.T_test):
                 x_out_test[:, :, t] = torch.squeeze(self.model(torch.unsqueeze(test_input[:, :, t], 2)))
 
         start = time.time()
 
-        if (randomInit):
-            self.model.InitSequence(test_init, SysModel.T_test)
-        else:
-            self.model.InitSequence(SysModel.m1x_0.reshape(1, SysModel.m, 1).repeat(self.N_T, 1, 1), SysModel.T_test)
+        # Always use true initial states
+        self.model.InitSequence(true_init_states, SysModel.T_test)
 
-        for t in range(0, SysModel.T_test):
+        # MODIFICATION: Directly assign initial state to output for t=0
+        x_out_test[:, :, 0] = torch.squeeze(true_init_states, 2)
+
+        # Start processing from t=1
+        for t in range(1, SysModel.T_test):
             x_out_test[:, :, t] = torch.squeeze(self.model(torch.unsqueeze(test_input[:, :, t], 2)))
 
         end = time.time()
+
         t = end - start
 
-        # MSE loss
         # MSE loss
         for j in range(self.N_T):  # cannot use batch due to different length and std computation
             if (MaskOnState):
@@ -428,9 +453,10 @@ class Pipeline_KN:
         return [self.MSE_test_linear_arr, self.MSE_test_linear_avg, self.MSE_test_dB_avg, x_out_test, t]
 
     def PlotTrain_KF(self, MSE_KF_linear_arr, MSE_KF_dB_avg):
+        # Replace Plot_extended with TrajectoryPlotter
+        self.Plot = TrajectoryPlotter(self.folderName, self.modelName)
 
-        self.Plot = Plot_extended(self.folderName, self.modelName)
-
+        # The method names remain the same due to compatibility methods in TrajectoryPlotter
         self.Plot.NNPlot_epochs(self.N_steps, MSE_KF_dB_avg,
                                 self.MSE_test_dB_avg, self.MSE_cv_dB_epoch, self.MSE_train_dB_epoch)
 
